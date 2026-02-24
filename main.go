@@ -8,44 +8,56 @@ import (
 )
 
 const logFileName = "data.log"
+const snapshotFileName = "snapshot.db"
 
 func main() {
 	store := make(map[string]string)
 
-	// Open log file
-	file, err := os.OpenFile(logFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+	logFile, err := os.OpenFile(logFileName, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		panic(err)
 	}
-	defer file.Close()
+	defer logFile.Close()
 
-	// Recover state from log
+	fmt.Println("Loading snapshot...")
+	loadSnapshot(store)
+
 	fmt.Println("Recovering from log...")
-	recoverFromLog(file, store)
+	recoverFromLog(logFile, store)
 
 	fmt.Println("MiniDB started. Type EXIT to quit.")
-	startREPL(store, file)
+	startREPL(store, logFile)
 }
 
-func recoverFromLog(file *os.File, store map[string]string) {
-	// Move cursor to beginning
-	file.Seek(0, 0)
+func loadSnapshot(store map[string]string) {
+	file, err := os.Open(snapshotFileName)
+	if err != nil {
+		return
+	}
+	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		applyCommand(line, store, false)
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			store[parts[0]] = parts[1]
+		}
+	}
+}
+
+func recoverFromLog(file *os.File, store map[string]string) {
+	file.Seek(0, 0)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		applyCommand(scanner.Text(), store, false, file)
 	}
 
-	if err := scanner.Err(); err != nil {
-		fmt.Println("Error during recovery:", err)
-	}
-
-	// Move cursor back to end for appending
 	file.Seek(0, os.SEEK_END)
 }
 
-func startREPL(store map[string]string, file *os.File) {
+func startREPL(store map[string]string, logFile *os.File) {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
@@ -58,19 +70,19 @@ func startREPL(store map[string]string, file *os.File) {
 			return
 		}
 
-		applyCommand(input, store, true, file)
+		applyCommand(input, store, true, logFile)
 	}
 }
 
-func applyCommand(input string, store map[string]string, logWrite bool, file ...*os.File) {
+func applyCommand(input string, store map[string]string, logWrite bool, logFile *os.File) {
 	parts := strings.Fields(input)
 	if len(parts) == 0 {
 		return
 	}
 
-	command := strings.ToUpper(parts[0])
+	cmd := strings.ToUpper(parts[0])
 
-	switch command {
+	switch cmd {
 
 	case "SET":
 		if len(parts) != 3 {
@@ -79,9 +91,8 @@ func applyCommand(input string, store map[string]string, logWrite bool, file ...
 		}
 		store[parts[1]] = parts[2]
 		fmt.Println("OK")
-
 		if logWrite {
-			appendToLog(file[0], input)
+			appendToLog(logFile, input)
 		}
 
 	case "GET":
@@ -89,11 +100,11 @@ func applyCommand(input string, store map[string]string, logWrite bool, file ...
 			fmt.Println("Usage: GET key")
 			return
 		}
-		value, exists := store[parts[1]]
-		if !exists {
+		val, ok := store[parts[1]]
+		if !ok {
 			fmt.Println("(nil)")
 		} else {
-			fmt.Println(value)
+			fmt.Println(val)
 		}
 
 	case "DELETE":
@@ -103,9 +114,8 @@ func applyCommand(input string, store map[string]string, logWrite bool, file ...
 		}
 		delete(store, parts[1])
 		fmt.Println("Deleted")
-
 		if logWrite {
-			appendToLog(file[0], input)
+			appendToLog(logFile, input)
 		}
 
 	case "KEYS":
@@ -117,18 +127,38 @@ func applyCommand(input string, store map[string]string, logWrite bool, file ...
 			fmt.Println(k)
 		}
 
+	case "SNAPSHOT":
+		createSnapshot(store)
+		clearLog(logFile)
+		fmt.Println("Snapshot created and log cleared.")
+
 	default:
 		fmt.Println("Unknown command")
 	}
 }
 
 func appendToLog(file *os.File, input string) {
-	_, err := fmt.Fprintln(file, input)
+	fmt.Fprintln(file, input)
+	file.Sync()
+}
+
+func createSnapshot(store map[string]string) {
+	file, err := os.Create(snapshotFileName)
 	if err != nil {
-		fmt.Println("Log write error:", err)
+		fmt.Println("Snapshot error:", err)
 		return
 	}
+	defer file.Close()
 
-	// Force disk flush (Durability)
+	writer := bufio.NewWriter(file)
+	for k, v := range store {
+		fmt.Fprintf(writer, "%s=%s\n", k, v)
+	}
+	writer.Flush()
 	file.Sync()
+}
+
+func clearLog(file *os.File) {
+	file.Truncate(0)
+	file.Seek(0, 0)
 }

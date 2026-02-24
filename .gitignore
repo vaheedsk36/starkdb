@@ -1,2 +1,2 @@
-snapshot.db
-data.log
+*.db
+*.log
